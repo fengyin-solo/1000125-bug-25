@@ -1,6 +1,7 @@
 """冷链订单业务规则：状态流转、字段校验与筛选口径都收在这里。"""
 from __future__ import annotations
 
+from threading import Lock
 from typing import Any
 
 from app.store import store
@@ -13,6 +14,9 @@ NEGATIVE_ACTIONS = []
 
 
 class OrderService:
+    def __init__(self) -> None:
+        self._create_lock = Lock()
+
     def list_entries(
         self,
         *,
@@ -22,29 +26,44 @@ class OrderService:
         size: int = 20,
     ) -> tuple[list[dict[str, Any]], int]:
         rows = store.rows(MODULE)
+        keyword = (keyword or "").strip()
+        status = (status or "").strip()
         if keyword:
             rows = [row for row in rows if keyword in str(row.get("订单编号", ""))]
         if status:
             rows = [row for row in rows if row.get("status") == status]
         total = len(rows)
-        start = max(page - 1, 0) * size
+        page = max(page, 1)
+        size = max(size, 1)
+        start = (page - 1) * size
         return rows[start:start + size], total
 
     def get_entry(self, entry_id: int) -> dict[str, Any] | None:
         return store.find(MODULE, entry_id)
 
-    def create_entry(self, values: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
-        missing = [field for field in REQUIRED_FIELDS if not str(values.get(field) or "").strip()]
+    def create_entry(self, values: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+        normalized = {field: str(values.get(field) or "").strip() for field in REQUIRED_FIELDS}
+        missing = [field for field in REQUIRED_FIELDS if not normalized[field]]
         if missing:
-            return None, missing
-        rows = store.rows(MODULE)
-        entry = {"id": max((int(row.get("id", 0)) for row in rows), default=0) + 1}
-        entry.update({field: values.get(field) for field in REQUIRED_FIELDS})
-        entry["status"] = STATUS_ORDER[0]
-        entry["pending"] = True
-        entry["abnormal"] = False
-        rows.append(entry)
-        return entry, []
+            return None, f"缺少必填字段：{'、'.join(missing)}"
+
+        with self._create_lock:
+            rows = store.rows(MODULE)
+            order_no = normalized["订单编号"]
+            existing = next(
+                (row for row in rows if str(row.get("订单编号", "")).strip() == order_no),
+                None,
+            )
+            if existing is not None:
+                return None, f"订单编号 {order_no} 已存在，请勿重复提交"
+
+            entry = {"id": max((int(row.get("id", 0)) for row in rows), default=0) + 1}
+            entry.update(normalized)
+            entry["status"] = STATUS_ORDER[0]
+            entry["pending"] = True
+            entry["abnormal"] = False
+            rows.append(entry)
+        return entry, "冷链订单已登记"
 
     def run_action(self, entry_id: int, action: str) -> tuple[dict[str, Any] | None, str]:
         entry = store.find(MODULE, entry_id)

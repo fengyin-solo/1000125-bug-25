@@ -20,12 +20,14 @@ STATUSES = ["待受理", "已受理", "已调度", "已完结", "已取消"]
 def list_entries(
     keyword: str | None = Query(default=None, description="按订单编号检索"),
     status: str | None = Query(default=None, description="待受理、已受理、已调度、已完结、已取消"),
-    page: int = 1,
-    size: int = 20,
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=20, ge=1),
 ) -> PageResult[dict]:
     """按订单编号与状态过滤冷链订单列表；没有数据时返回空页，不报错。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
+    if status and status not in STATUSES:
+        raise HTTPException(status_code=400, detail=f"订单状态「{status}」不存在，请重新选择")
     items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
     return PageResult(items=items, total=total, page=page, size=size)
 
@@ -42,10 +44,8 @@ def get_entry(entry_id: int) -> dict:
 @router.post("", response_model=ActionResult)
 def create_entry(payload: EntryPayload) -> ActionResult:
     """登记一条冷链订单，缺字段时说明原因而不是静默丢弃。"""
-    entry, missing = service.create_entry(payload.values)
-    if missing:
-        return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
-    return ActionResult(ok=True, message="冷链订单已登记", entry=entry)
+    entry, message = service.create_entry(payload.values)
+    return ActionResult(ok=entry is not None, message=message, entry=entry)
 
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
